@@ -5,7 +5,7 @@ import { Button } from '@/components/ui/button';
 import { Brain, RefreshCw } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 import { useToast } from '@/hooks/use-toast';
-import { supabase } from '@/integrations/supabase/client';
+import { apiFetch } from '@/lib/api';
 
 interface Insight {
   id: string;
@@ -36,19 +36,20 @@ const AIAnalytics = () => {
   const [insights, setInsights] = useState<Insight[]>([]);
 
   const loadInsights = async () => {
-    if (!profile?.id) return;
+    if (!profile?.email) return;
     setLoading(true);
     try {
-      const { data, error } = await supabase
-        .from('ai_insights')
-        .select('id, insight_type, content, risk_level, recommendations, created_at')
-        .eq('patient_id', profile.id)
-        .order('created_at', { ascending: false });
-      if (error) {
-        console.error('Error loading insights:', error);
-      } else {
-        setInsights((data || []) as any);
-      }
+      const data = await apiFetch<Insight[]>(`/api/ai/insights/?role=patient&_=${Date.now()}`, {
+        method: 'GET',
+        headers: { 'X-User-Email': profile.email },
+      });
+      const sorted = (data || []).slice().sort((a, b) => (
+        new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+      ));
+      setInsights(sorted);
+    } catch (e) {
+      console.error('Error loading insights:', e);
+      toast({ variant: 'destructive', title: 'Failed to load insights', description: (e as any)?.message || '' });
     } finally {
       setLoading(false);
     }
@@ -57,7 +58,7 @@ const AIAnalytics = () => {
   useEffect(() => {
     loadInsights();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [profile?.id]);
+  }, [profile?.email]);
 
   const renderSummary = (content: any) => {
     if (!content) return 'No summary available';
@@ -108,13 +109,20 @@ const AIAnalytics = () => {
               <div className="text-sm text-muted-foreground">
                 {renderSummary(insight.content)}
               </div>
-              {insight.recommendations && insight.recommendations.length > 0 && (
-                <ul className="list-disc pl-5 text-sm">
-                  {insight.recommendations.slice(0, 5).map((r, idx) => (
-                    <li key={idx}>{r}</li>
-                  ))}
-                </ul>
-              )}
+              {(() => {
+                const recs = Array.isArray(insight.recommendations)
+                  ? insight.recommendations
+                  : typeof insight.recommendations === 'string'
+                  ? [insight.recommendations]
+                  : [];
+                return recs.length > 0 ? (
+                  <ul className="list-disc pl-5 text-sm">
+                    {recs.slice(0, 5).map((r, idx) => (
+                      <li key={idx}>{r}</li>
+                    ))}
+                  </ul>
+                ) : null;
+              })()}
             </div>
           ))}
         </CardContent>

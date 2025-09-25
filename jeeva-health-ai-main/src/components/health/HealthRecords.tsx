@@ -8,8 +8,7 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle, DialogT
 import { Plus, Download } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 import { useToast } from '@/hooks/use-toast';
-import { supabase } from '@/integrations/supabase/client';
-import type { Enums } from '@/integrations/supabase/types';
+import { apiFetch } from '@/lib/api';
 
 interface HealthRecordItem {
   id: string;
@@ -37,19 +36,16 @@ const HealthRecords = () => {
   const [records, setRecords] = useState<HealthRecordItem[]>([]);
 
   const loadRecords = async () => {
-    if (!profile?.id) return;
+    if (!profile?.email) return;
     setLoadingList(true);
     try {
-      const { data, error } = await supabase
-        .from('health_records')
-        .select('id, record_type, title, description, file_url, file_type, date_recorded, created_at')
-        .eq('patient_id', profile.id)
-        .order('created_at', { ascending: false });
-      if (error) {
-        console.error('Error loading records:', error);
-      } else {
-        setRecords((data || []) as any);
-      }
+      const data = await apiFetch<HealthRecordItem[]>(`/api/records/`, {
+        method: 'GET',
+        headers: { 'X-User-Email': profile.email },
+      });
+      setRecords(data || []);
+    } catch (e) {
+      console.error('Error loading records:', e);
     } finally {
       setLoadingList(false);
     }
@@ -60,20 +56,11 @@ const HealthRecords = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [profile?.id]);
 
-  const handleGetSignedUrl = async (path: string | null) => {
-    if (!path) return null;
-    const { data, error } = await supabase.storage.from('health-records').createSignedUrl(path, 60);
-    if (error) {
-      console.error('Signed URL error:', error);
-      toast({ variant: 'destructive', title: 'Download failed', description: error.message });
-      return null;
-    }
-    return data?.signedUrl || null;
-  };
+  const handleGetSignedUrl = async (url: string | null) => url;
 
   const handleUpload = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!profile?.id || !user?.id) return;
+    if (!profile?.email) return;
     if (!file || !title.trim()) {
       toast({
         variant: 'destructive',
@@ -85,60 +72,57 @@ const HealthRecords = () => {
 
     setUploading(true);
     try {
-      const ext = file.name.split('.').pop();
-      const path = `${user.id}/${crypto.randomUUID()}.${ext || 'bin'}`;
+      // Upload file to backend if provided
+      let uploadedUrl: string | null = null;
+      if (file) {
+        const form = new FormData();
+        form.append('file', file);
+        const uploadRes = await apiFetch<any>(`/api/records/upload/`, {
+          method: 'POST',
+          headers: { 'X-User-Email': profile.email },
+          body: form,
+        });
+        uploadedUrl = uploadRes?.file_url || null;
+      }
 
-      const { error: uploadErr } = await supabase
-        .storage
-        .from('health-records')
-        .upload(path, file, { upsert: false });
-
-      if (uploadErr) throw uploadErr;
-
-      const fileUrl = path; // We'll use path; signed URLs can be generated when viewing
-
-      const { data: inserted, error: insertErr } = await supabase
-        .from('health_records')
-        .insert({
-          patient_id: profile.id,
-          record_type: recordType as Enums<'record_type'>,
+      const created = await apiFetch<any>(`/api/records/`, {
+        method: 'POST',
+        headers: { 'X-User-Email': profile.email },
+        body: {
+          record_type: recordType,
           title: title.trim(),
           description: description.trim() || null,
-          file_url: fileUrl,
-          file_type: file.type || ext || null,
-          hospital_name: null,
-        })
-        .select('id')
-        .single();
-
-      if (insertErr) throw insertErr;
+          file_url: uploadedUrl,
+          file_type: file?.type || null,
+        },
+      });
 
       // Invoke AI analysis (basic: use title + description)
       try {
-        const { data: analysisResp, error: fnErr } = await supabase.functions.invoke('analyze-health-records', {
-          body: {
-            record_text: `${title} \n${description}`.trim(),
-            record_type: recordType,
-            patient_id: profile.id,
-            record_id: inserted.id,
-          }
-        });
-        if (fnErr) throw fnErr;
-        const parsed = (() => {
-          try {
-            return analysisResp?.analysis ? JSON.parse(analysisResp.analysis) : { raw: analysisResp?.analysis };
-          } catch {
-            return { raw: analysisResp?.analysis };
-          }
-        })();
+        // If the uploaded file is an image, include base64 to enable handwritten prescription OCR by Gemini
+        let image_base64: string | undefined;
+        let image_mime: string | undefined;
+        if (file && file.type.startsWith('image/')) {
+          const asBase64 = await new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(String((reader.result as string).split(',')[1] || ''));
+            reader.onerror = (e) => reject(e);
+            reader.readAsDataURL(file);
+          });
+          image_base64 = asBase64;
+          image_mime = file.type;
+        }
 
-        await supabase.from('ai_insights').insert({
-          patient_id: profile.id,
-          record_id: inserted.id,
-          insight_type: recordType,
-          content: parsed,
-          risk_level: parsed?.risk_level || null,
-          recommendations: parsed?.recommendations || null,
+        await apiFetch(`/api/ai/insights/analyze/`, {
+          method: 'POST',
+          headers: { 'X-User-Email': profile.email },
+          body: {
+            record_id: created?.id,
+            record_type: recordType,
+            record_text: `${title} \n${description}`.trim(),
+            image_base64,
+            image_mime,
+          },
         });
       } catch (analysisError) {
         console.warn('AI analysis failed, continuing:', analysisError);

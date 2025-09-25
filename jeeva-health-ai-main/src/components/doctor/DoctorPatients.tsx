@@ -6,73 +6,40 @@ import { Label } from '@/components/ui/label';
 import { Users } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 import { useToast } from '@/hooks/use-toast';
-import { supabase } from '@/integrations/supabase/client';
+import { apiFetch } from '@/lib/api';
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
+import { Textarea } from '@/components/ui/textarea';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 
 const DoctorPatients = () => {
-  const { profile, user, refreshProfile } = useAuth();
+  const { profile } = useAuth();
   const { toast } = useToast();
   const [loading, setLoading] = useState(false);
   const [patients, setPatients] = useState<any[]>([]);
   const [email, setEmail] = useState('');
   const [adding, setAdding] = useState(false);
-  const [doctorId, setDoctorId] = useState<string | null>(null);
-
-  const resolveDoctorId = async (): Promise<string | null> => {
-    try {
-      if (doctorId) return doctorId;
-      if (profile?.id) {
-        setDoctorId(profile.id);
-        return profile.id;
-      }
-      if (!user?.id) return null;
-      const { data, error } = await supabase
-        .from('profiles')
-        .select('id')
-        .eq('user_id', user.id)
-        .maybeSingle();
-      if (error) {
-        console.error('Error resolving doctor id:', error);
-        return null;
-      }
-      if (data?.id) {
-        setDoctorId(data.id);
-        refreshProfile?.();
-        return data.id;
-      }
-      return null;
-    } catch (e) {
-      console.error('Resolve doctor id exception:', e);
-      return null;
-    }
-  };
+  const [uploadOpen, setUploadOpen] = useState(false);
+  const [selectedPatient, setSelectedPatient] = useState<any | null>(null);
+  const [noteTitle, setNoteTitle] = useState('Prescription');
+  const [noteDesc, setNoteDesc] = useState('');
+  const [noteType, setNoteType] = useState<'prescription' | 'consultation_note'>('prescription');
+  const [savingNote, setSavingNote] = useState(false);
+  
 
   const loadPatients = async () => {
-    const id = await resolveDoctorId();
-    if (!id) return;
+    if (!profile?.email) return;
     setLoading(true);
     try {
-      const { data, error } = await supabase
-        .from('consent_requests')
-        .select(`
-          id,
-          status,
-          patient:patient_id ( id, first_name, last_name, email )
-        `)
-        .eq('doctor_id', id)
-        .eq('status', 'approved')
-        .order('updated_at', { ascending: false });
-
-      if (error) {
-        console.error('Error loading patients:', error);
-      } else {
-        const uniquePatientsMap = new Map<string, any>();
-        (data || []).forEach((r: any) => {
-          if (r.patient?.id && !uniquePatientsMap.has(r.patient.id)) {
-            uniquePatientsMap.set(r.patient.id, r.patient);
-          }
-        });
-        setPatients(Array.from(uniquePatientsMap.values()));
-      }
+      const data = await apiFetch<any[]>(`/api/consents/?role=doctor`, {
+        headers: { 'X-User-Email': profile.email },
+      });
+      const uniquePatientsMap = new Map<string, any>();
+      (data || []).filter(r => r.status === 'approved').forEach((r: any) => {
+        if (r.patient && !uniquePatientsMap.has(r.patient.email)) {
+          uniquePatientsMap.set(r.patient.email, r.patient);
+        }
+      });
+      setPatients(Array.from(uniquePatientsMap.values()));
     } finally {
       setLoading(false);
     }
@@ -81,12 +48,11 @@ const DoctorPatients = () => {
   useEffect(() => {
     loadPatients();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [profile?.id, user?.id]);
+  }, [profile?.email]);
 
   const handleAdd = async (e: React.FormEvent) => {
     e.preventDefault();
-    const id = await resolveDoctorId();
-    if (!id || !user?.id) {
+    if (!profile?.email) {
       toast({ variant: 'destructive', title: 'Doctor profile not ready', description: 'Please wait and try again.' });
       return;
     }
@@ -96,22 +62,14 @@ const DoctorPatients = () => {
     }
     setAdding(true);
     try {
-      const normalizedEmail = email.trim();
-      const { data, error } = await supabase.functions.invoke('request-consent', {
-        body: {
-          doctor_user_id: user.id,
-          patient_email: normalizedEmail,
-          purpose: 'Add patient under care',
-        }
+      await apiFetch('/api/consents/', {
+        method: 'POST',
+        headers: { 'X-User-Email': profile.email },
+        body: { patient_email: email.trim(), purpose: 'Add patient under care' },
       });
-      if (error) throw error as any;
-      if (data?.success) {
-        toast({ title: 'Consent request sent' });
-        setEmail('');
-        await loadPatients();
-      } else {
-        toast({ variant: 'destructive', title: 'Failed', description: data?.error || 'Could not send request' });
-      }
+      toast({ title: 'Consent request sent' });
+      setEmail('');
+      await loadPatients();
     } catch (err: any) {
       console.error('Error requesting consent:', err);
       toast({ variant: 'destructive', title: 'Failed to send request', description: err?.message || 'Please try again.' });
@@ -161,8 +119,75 @@ const DoctorPatients = () => {
                     <p className="font-medium">{p.first_name} {p.last_name}</p>
                     <p className="text-xs text-muted-foreground">{p.email}</p>
                   </div>
-                  <div className="text-right">
+                  <div className="flex items-center gap-2">
                     <span className="text-xs text-muted-foreground">Approved</span>
+                    <Dialog open={uploadOpen && selectedPatient?.email === p.email} onOpenChange={(v) => { if (!v) { setUploadOpen(false); setSelectedPatient(null); } }}>
+                      <DialogTrigger asChild>
+                        <Button size="sm" onClick={() => { setSelectedPatient(p); setUploadOpen(true); }}>Add Prescription</Button>
+                      </DialogTrigger>
+                      <DialogContent>
+                        <DialogHeader>
+                          <DialogTitle>Add Prescription/Note for {p.first_name || p.email}</DialogTitle>
+                        </DialogHeader>
+                        <div className="space-y-3">
+                          <div>
+                            <label className="text-sm">Type</label>
+                            <Select value={noteType} onValueChange={(v) => setNoteType(v as any)}>
+                              <SelectTrigger className="mt-1"><SelectValue placeholder="Select" /></SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="prescription">Prescription</SelectItem>
+                                <SelectItem value="consultation_note">Consultation Note</SelectItem>
+                              </SelectContent>
+                            </Select>
+                          </div>
+                          <div>
+                            <label className="text-sm">Title</label>
+                            <Input value={noteTitle} onChange={(e) => setNoteTitle(e.target.value)} placeholder="e.g., Prescription - 25 Sep" />
+                          </div>
+                          <div>
+                            <label className="text-sm">Details</label>
+                            <Textarea value={noteDesc} onChange={(e) => setNoteDesc(e.target.value)} placeholder="Medicines, dosage, instructions" rows={5} />
+                          </div>
+                        </div>
+                        <DialogFooter>
+                          <Button onClick={async () => {
+                            if (!profile?.email || !selectedPatient?.email) return;
+                            setSavingNote(true);
+                            try {
+                              const created = await apiFetch<any>(`/api/records/`, {
+                                method: 'POST',
+                                headers: { 'X-User-Email': profile.email },
+                                body: {
+                                  patient_email: selectedPatient.email,
+                                  record_type: noteType,
+                                  title: noteTitle.trim() || 'Prescription',
+                                  description: noteDesc.trim() || null,
+                                  file_url: '',
+                                  file_type: 'text/plain',
+                                },
+                              });
+                              await apiFetch(`/api/ai/insights/analyze/`, {
+                                method: 'POST',
+                                headers: { 'X-User-Email': profile.email },
+                                body: {
+                                  patient_email: selectedPatient.email,
+                                  record_id: created?.id,
+                                  record_type: noteType,
+                                  record_text: `${noteTitle}\n${noteDesc}`.trim(),
+                                },
+                              });
+                              toast({ title: 'Prescription added' });
+                              setUploadOpen(false);
+                              setSelectedPatient(null);
+                            } catch (e: any) {
+                              toast({ variant: 'destructive', title: 'Failed to add', description: e?.message || 'Please try again.' });
+                            } finally {
+                              setSavingNote(false);
+                            }
+                          }} disabled={savingNote}>{savingNote ? 'Saving...' : 'Save'}</Button>
+                        </DialogFooter>
+                      </DialogContent>
+                    </Dialog>
                   </div>
                 </div>
               ))}
